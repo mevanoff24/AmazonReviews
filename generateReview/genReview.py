@@ -10,7 +10,6 @@ def ptb_iterator(raw_data, batch_size, num_steps, epochs, steps_ahead=1):
 
 	data = np.array(raw_data)
 	data_len = data.shape[0]
-	# using (data_len-1) because we must provide for the sequence shifted by 1 too
 	nb_batches = (data_len - 1) // (batch_size * num_steps)
 	assert nb_batches > 0, "Not enough data, even for a single batch. Try using a smaller batch_size."
 	rounded_data_len = nb_batches * batch_size * num_steps
@@ -21,7 +20,7 @@ def ptb_iterator(raw_data, batch_size, num_steps, epochs, steps_ahead=1):
 		for batch in range(nb_batches):
 			x = xdata[:, batch * num_steps:(batch + 1) * num_steps]
 			y = ydata[:, batch * num_steps:(batch + 1) * num_steps]
-			x = np.roll(x, -epoch, axis=0)  # to continue the text from epoch to epoch (do not reset rnn state!)
+			x = np.roll(x, -epoch, axis=0)  
 			y = np.roll(y, -epoch, axis=0)
 			yield x, y, epoch
 
@@ -31,7 +30,7 @@ class CharRNN(object):
 		self.V = V
 		self.save_dir = save_dir
 
-	def fit(self, X, num_steps=10, num_layers=3, learning_rate=1e-05, batch_size=32, epochs=10, print_period=50, fit_model=True, gen_text=False):
+	def fit(self, X, num_steps=10, num_layers=3, learning_rate=1e-05, batch_size=32, epochs=1, print_period=50, fit_model=True, gen_text=False):
 
 		tfX = tf.placeholder(tf.int32, shape=[batch_size, num_steps], name='tfX') 
 		tfY = tf.placeholder(tf.int32, shape=[batch_size, num_steps], name='tfY')
@@ -39,15 +38,10 @@ class CharRNN(object):
 		tfXOH = tf.one_hot(tfX, self.V)
 		tfYOH = tf.one_hot(tfY, self.V)
 
-		# with tf.variable_scope('embedding-layer'):
-		# 	embeddings = tf.get_variable('embeddings', shape=[self.V, self.M])
-		# 	rnn_outputs = tf.nn.embedding_lookup(embeddings, tfX, name='lookup')
-
 		cell = tf.contrib.rnn.GRUCell(self.M)
 		cell = tf.contrib.rnn.MultiRNNCell([cell]*num_layers)
 		init_state = cell.zero_state(batch_size, dtype=tf.float32)
 		rnn_outputs, final_state = tf.nn.dynamic_rnn(cell, tfXOH, initial_state=init_state)
-		# rnn_outputs, final_state = tf.nn.dynamic_rnn(cell, tfX, initial_state=init_state)
 		final_state = tf.identity(final_state, name='final_state')
 
 		with tf.variable_scope('softmax-layer'):
@@ -57,7 +51,7 @@ class CharRNN(object):
 		rnn_outputs = tf.reshape(rnn_outputs, [-1, self.M])
 		logits = tf.matmul(rnn_outputs, W) + b
 		y_reshape = tf.reshape(tfYOH, [batch_size*num_steps, self.V])
-		# y_reshape = tf.reshape(tfY, [-1])
+
 		predictions = tf.nn.softmax(logits, name='predictions')
 		Y_arg = tf.argmax(predictions, 1)
 		Y_arg = tf.reshape(Y_arg, [batch_size, num_steps])
@@ -77,7 +71,6 @@ class CharRNN(object):
 		init = tf.global_variables_initializer()
 
 		saver = tf.train.Saver()
-		summary_writer = tf.summary.FileWriter(os.path.join(self.save_dir + '/logs'))
 
 		if gen_text:
 			return dict(
@@ -93,6 +86,7 @@ class CharRNN(object):
 
 		if fit_model: 
 			with tf.Session() as sess:
+				summary_writer = tf.summary.FileWriter(os.path.join(self.save_dir + '/logs'), sess.graph)
 				try:
 					print("Trying to restore last checkpoint ...")
 					last_chk_path = tf.train.latest_checkpoint(checkpoint_dir=self.save_dir)
@@ -101,32 +95,38 @@ class CharRNN(object):
 				except:
 					print("Failed to restore checkpoint. Initializing variables instead.")  
 					sess.run(init)
-					ostate = sess.run(init_state)
 
+				# ostate = sess.run(init_state)
 				for batch_x, batch_y, epoch in ptb_iterator(X, batch_size, num_steps, epochs):
+					training_state = None
 
 					feed_dict = {tfX: batch_x, tfY: batch_y}
-					for i, v in enumerate(init_state):
-						feed_dict[v] = ostate[i]
+					if training_state is not None:
+						feed_dict[init_state] = training_state
+
+					# for i, v in enumerate(init_state):
+					# 	feed_dict[v] = ostate[i]
 					
-					i_global, _, train_loss, isstate, sm = sess.run([global_step, optimizer, total_loss, final_state, summaries], 
+					# i_global, _, train_loss, isstate, sm = sess.run([global_step, optimizer, total_loss, final_state, summaries], 
+													# feed_dict=feed_dict)
+					i_global, _, train_loss, training_state, sm = sess.run([global_step, optimizer, total_loss, final_state, summaries], 
 													feed_dict=feed_dict)
 					summary_writer.add_summary(sm, i_global)
 
 
 					if i_global % print_period == 0:
 						feed_dict = {tfX: batch_x, tfY: batch_y}
-						for i, v in enumerate(init_state):
-							feed_dict[v] = ostate[i]
+						# for i, v in enumerate(init_state):
+						# 	feed_dict[v] = ostate[i]
 
 						acc, l = sess.run([accuracy, total_loss], feed_dict=feed_dict)
 						print 'epoch', epoch, 'iteration', i_global, 'accuracy', acc, 'loss', l 
 
-					isstate = ostate
+					# isstate = ostate
 
 				if not os.path.exists(self.save_dir):
 					os.makedirs(self.save_dir)
-				saver.save(sess, os.path.join(self.save_dir + '/model'))
+				saver.save(sess, os.path.join(self.save_dir + '/model'), global_step=global_step)
 
 
 
@@ -142,29 +142,18 @@ class CharRNN(object):
 		preds = g['preds']
 		saver = g['saver']
 		with tf.Session() as sess:
-			# new_saver = tf.train.import_meta_graph(os.path.join(self.save_dir + '/model.meta'))
-			# new_saver.restore(sess, tf.train.latest_checkpoint(self.save_dir + '/'))
 			saver.restore(sess, tf.train.latest_checkpoint(self.save_dir + '/'))
 			state = None
-			h = np.zeros([1, 512 * 3], dtype=np.float32)
-			# x = vocab2idx[prompt]
-			# x = np.array([[x]])
-			# final_chars = x.tolist()
-			# y = x
 			current_char = vocab2idx[prompt]
 			chars = [current_char]
 			for i in range(num_chars):
 				if state is not None:
-					# feed_dict = {tfX: [[current_char]], init_state: h}
-					# below works
 					feed_dict = {tfX: [[current_char]]}
 					for i, v in enumerate(init_state):
 						feed_dict[v] = state[i]
 
 				else:
 					feed_dict = {tfX: [[current_char]]}
-				# feed_dict = {tfX: [y]}
-				# feed_dict, state = {tfX: [[current_char]],}
 				p, state = sess.run([preds, final_state], feed_dict=feed_dict)
 
 				if pick_top_chars is not None:
@@ -182,29 +171,15 @@ class CharRNN(object):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def main():
 
 	vocab, vocab_size, vocab2idx, idx2vocab, X = get_char_data()
 
 	model = CharRNN(512, vocab_size)
-	# model.fit(X)
+	model.fit(X)
 	model.generate_text(vocab, 750, vocab2idx, idx2vocab, vocab_size, pick_top_chars=10)
 
 
 
 if __name__ == '__main__':
 	main()
-
