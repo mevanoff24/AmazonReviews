@@ -13,8 +13,28 @@ def init_weight_and_bias(insize, outsize):
 	return w.astype(np.float32), b.astype(np.float32)
 
 
+def batch_norm_wrapper(inputs, is_training, decay=0.999, epsilon=1e-3):
+    scale = tf.Variable(tf.ones([inputs.get_shape()[-1]]))
+    beta = tf.Variable(tf.zeros([inputs.get_shape()[-1]]))
+    pop_mean = tf.Variable(tf.zeros([inputs.get_shape()[-1]]), trainable=False)
+    pop_var = tf.Variable(tf.ones([inputs.get_shape()[-1]]), trainable=False)
+
+    if is_training:
+        batch_mean, batch_var = tf.nn.moments(inputs,[0])
+        train_mean = tf.assign(pop_mean,
+                               pop_mean * decay + batch_mean * (1 - decay))
+        train_var = tf.assign(pop_var,
+                              pop_var * decay + batch_var * (1 - decay))
+        with tf.control_dependencies([train_mean, train_var]):
+            return tf.nn.batch_normalization(inputs,
+                batch_mean, batch_var, beta, scale, epsilon)
+    else:
+        return tf.nn.batch_normalization(inputs,
+            pop_mean, pop_var, beta, scale, epsilon)
+
+
 class HiddenLayer(object):
-	def __init__(self, insize, outsize, count):
+	def __init__(self, insize, outsize, count, batch_norm=False):
 		self.insize = insize
 		self.outsize = outsize
 		W, b = init_weight_and_bias(insize, outsize)
@@ -23,6 +43,10 @@ class HiddenLayer(object):
 		self.params = [self.W, self.b]
 
 	def forward(self, X):
+		if batch_norm:
+			Z = tf.matmul(X, self.W) + self.b
+			Z = batch_norm_wrapper(Z, is_training=True)
+			return tf.nn.relu(Z)
 		return tf.nn.relu(tf.matmul(X, self.W) + self.b)
 
 
@@ -68,7 +92,6 @@ class ANN(object):
 		loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=tfY, logits=logits)) + rcost * reg
 
 		optimizer = tf.train.AdamOptimizer(learning_rate).minimize(loss)
-		# correct_predictions = tf.equal(self.predict(tfX, train_phase=True), tf.argmax(tfY, 1))
 		pred_opt = self.predict(tfX, train_phase=True)
 
 		n_batches = N / batch_size
@@ -131,7 +154,7 @@ if __name__ == '__main__':
 
 	X, y = bag_of_words_data()
 
-	X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=101, random_state=100) 
+	X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=100, random_state=100) 
 
 	model = ANN([512, 1024, 512])
 	model.fit(X_train, y_train, learning_rate=1e-04, epochs=10, show_fig=True)
