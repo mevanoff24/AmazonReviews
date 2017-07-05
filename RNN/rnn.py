@@ -7,55 +7,8 @@ import os
 
 from utils import get_sequence_data, oneHot
 
-# def accuracy(y_true, y_pred):
-#     return np.mean(y_true, y_pred)
-
-
-def gen_batch(raw_data, batch_size, num_steps):
-    raw_x, raw_y = raw_data
-    data_length = len(raw_x)
-    raw_x = raw_x[:, 0]
-
-    # partition raw data into batches and stack them vertically in a data matrix
-    batch_partition_length = data_length // batch_size
-    data_x = np.zeros([batch_size, batch_partition_length], dtype=np.int32)
-    data_y = np.zeros([batch_size, batch_partition_length], dtype=np.int32)
-    for i in range(batch_size):
-        data_x[i] = raw_x[batch_partition_length * i:batch_partition_length * (i + 1)]
-        data_y[i] = raw_y[batch_partition_length * i:batch_partition_length * (i + 1)]
-    # further divide batch partitions into num_steps for truncated backprop
-    epoch_size = batch_partition_length // num_steps
-
-    for i in range(epoch_size):
-        x = data_x[:, i * num_steps:(i + 1) * num_steps]
-        y = data_y[:, i * num_steps:(i + 1) * num_steps]
-        yield (x, y)
-
-
-def gen_batch_test(raw_data, batch_size, num_steps):
-    raw_x, raw_y = raw_data
-    data_length = len(raw_x)
-    raw_x = raw_x[:, 0]
-
-    # partition raw data into batches and stack them vertically in a data matrix
-    batch_partition_length = data_length // batch_size
-    data_x = np.zeros([batch_size, batch_partition_length], dtype=np.int32)
-    data_y = np.zeros([batch_size, batch_partition_length], dtype=np.int32)
-    for i in range(batch_size):
-        data_x[i] = raw_x[batch_partition_length * i:batch_partition_length * (i + 1)]
-        data_y[i] = raw_y[batch_partition_length * i:batch_partition_length * (i + 1)]
-    # further divide batch partitions into num_steps for truncated backprop
-    epoch_size = batch_partition_length // num_steps
-    for i in range(epoch_size):
-        x = data_x[:, i * num_steps:(i + 1) * num_steps]
-        y = data_y[:, i * num_steps:(i + 1) * num_steps]
-        return x, y
-
-
-def gen_epochs(n, batch_size, num_steps):
-    for i in range(n):
-        X, y, _, _ = get_sequence_data()
-        yield gen_batch((X, y), batch_size, num_steps)
+def accuracy(y_true, y_pred):
+    return np.mean(y_true == y_pred)
 
 
 def length(data):
@@ -65,14 +18,13 @@ def length(data):
     return length
 
 
-
 class RNN(object):
     def __init__(self, M, V, save_dir='RNN'):
         self.M = M
         self.V = V
         self.save_dir = save_dir
 
-    def fit(self, X, y, num_steps=10, num_layers=1, learning_rate=1e-05, reg=0.1, batch_size=32, epochs=100, print_period=10, show_fig=False):
+    def fit(self, X, y, num_steps=1, num_layers=1, learning_rate=1e-05, reg=0.1, batch_size=32, epochs=100, print_period=10, show_fig=False):
 
         X_train, X_dev, y_train, y_dev = train_test_split(X, y, test_size=500, random_state=100)
 
@@ -81,46 +33,37 @@ class RNN(object):
         y_trainOh = oneHot(y_train)
         y_devOh = oneHot(y_dev)
 
-        tfX = tf.placeholder(tf.int32, shape=[None, num_steps], name='tfX')
-        tfY = tf.placeholder(tf.int32, shape=[None, num_steps], name='tfY')
-        tfY_OH = tf.one_hot(tfY, K)
+        tfX = tf.placeholder(tf.int32, shape=[None, D, num_steps], name='tfX')
+        tfY = tf.placeholder(tf.int32, shape=[None, K], name='tfY')
 
         with tf.variable_scope('embedding-layer'):
             embeddings = tf.get_variable('embeddings', [self.V, self.M])
             rnn_inputs = tf.nn.embedding_lookup(embeddings, tfX, name='lookup')
 
-        cell = tf.contrib.rnn.GRUCell(self.M)
-        cell = tf.contrib.rnn.MultiRNNCell([cell]*num_layers)
-        init_state = cell.zero_state(batch_size, dtype=tf.float32)
+        rnn_inputs = tf.reshape(rnn_inputs, (-1, D * num_steps, self.M))
 
-        seq_length = length(tfX)
-        rnn_outputs, final_state = tf.nn.dynamic_rnn(cell, rnn_inputs, 
-                                        initial_state=init_state, sequence_length=seq_length)
-        rnn_outputs = tf.reshape(rnn_outputs, [-1, self.M])
+        cell = tf.contrib.rnn.LSTMCell(self.M)
+
+        rnn_outputs, final_state = tf.nn.dynamic_rnn(cell, rnn_inputs, dtype=tf.float32)
+        rnn_outputs = tf.transpose(rnn_outputs, [1, 0, 2])
+        rnn_outputs = tf.gather(rnn_outputs, int(rnn_outputs.get_shape()[0]) - 1)
 
         with tf.variable_scope('softmax-layer'):
             W = tf.get_variable('W', shape=[self.M, K])
             b = tf.get_variable('b', shape=[K], initializer=tf.constant_initializer(0.0))
 
         logits = tf.matmul(rnn_outputs, W) + b
-        y_reshape = tf.reshape(tfY_OH, [batch_size*num_steps, -1])
+        print logits.get_shape()
+
         predictions = tf.nn.softmax(logits)
-
-        batch_loss = tf.nn.softmax_cross_entropy_with_logits(labels=y_reshape, logits=logits)
-        total_loss = tf.reduce_mean(batch_loss)
-        loss_summary = tf.summary.scalar('loss', total_loss)
-
-        optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
         pred_opt = tf.argmax(predictions, 1)
-        pred_opt = tf.reshape(pred_opt, [batch_size, -1])
-        # correct_pred = 
-        accuracy = tf.reduce_mean(tf.cast(tf.equal(tfY, tf.cast(pred_opt, tf.int32)), tf.float32))
 
+        print tfY.get_shape()
+        loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=tfY, logits=logits))
+
+        optimizer = tf.train.AdamOptimizer(learning_rate).minimize(loss)
         init = tf.global_variables_initializer()
-        saver = tf.train.Saver()
-
-        train_costs = []
-        dev_costs = []
+        n_batches = N // batch_size
 
         with tf.Session() as sess:
             try:
@@ -131,47 +74,45 @@ class RNN(object):
             except:
                 print("Failed to restore checkpoint. Initializing variables instead.")  
                 sess.run(init)
+            
+            for epoch in range(epochs):
+                X_train, y_train = shuffle(X_train, y_train)
+                
+                total_cost = 0.
+                for i in range(n_batches):
+                    batch_x = X_train[i * batch_size : (i * batch_size + batch_size)]
+                    batch_x = batch_x.reshape(batch_size, D, num_steps)
+                    batch_y = y_trainOh[i * batch_size : (i * batch_size + batch_size)]
+                    
+                    _, cost, pred_i = sess.run([optimizer, loss, pred_opt], feed_dict={tfX: batch_x, tfY: batch_y})
+        #             acc = accuracy(pred, np.argmax(batch_y, 1))
+        #             print cost, acc
+                    total_cost += cost
+                    if i % print_period == 0: 
+                        val_pred = sess.run(pred_opt, feed_dict={tfX: X_dev.reshape(-1, D, num_steps), tfY: y_devOh})
+                        acc = accuracy(val_pred, y_dev)
 
-            istate = sess.run(init_state)
-            for idx, epoch in enumerate(gen_epochs(epochs, batch_size, num_steps)):
-                for step, (batch_x, batch_y) in enumerate(epoch):
-                    # _, train_loss, state, train_acc = sess.run([optimizer, total_loss, final_state, accuracy], 
-                                            # feed_dict={tfX: batch_x, tfY: batch_y})
-                    feed_dict={tfX: batch_x, tfY: batch_y}
-                    for i, v in enumerate(init_state):
-                        feed_dict[v] = istate[i]
-
-                    _, train_loss, state, train_acc = sess.run([optimizer, total_loss, final_state, accuracy], 
-                                            feed_dict=feed_dict)
-
-                    if step % print_period == 0:
-                        X_dev_batch, y_dev_batch = gen_batch_test((X_dev, y_dev), batch_size, num_steps)
-                        dev_loss = sess.run(total_loss, feed_dict={tfX: X_dev_batch, tfY: y_dev_batch})
-                        train_costs.append(train_loss)
-                        dev_costs.append(dev_loss)
-                        val_acc = sess.run(accuracy, feed_dict={tfX: X_dev_batch, tfY: y_dev_batch})
-                        print 'step', step, 'epoch', idx, 'dev_loss', dev_loss, 'train_loss', train_loss, 'train accuracy', train_acc, 'val accuracy', val_acc
-                  
-                    istate = state
+                        print 'epoch', epoch, 'cost', total_cost, 'accuracy', acc
 
             if not os.path.exists(self.save_dir):
                 os.makedirs(self.save_dir)
-            saver.save(sess, os.path.join(self.save_dir + '/model'))
+                saver.save(sess, os.path.join(self.save_dir + '/model'))
 
         if show_fig:
             plt.plot(train_costs, label='train_costs')
             plt.plot(dev_costs, label='dev_costs')
             plt.legend()
             plt.show()
- 
-        
+
 
 
 
 def main():
     X, y, V, vocab_processor = get_sequence_data()
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=100, random_state=100) 
-
+    print y[:10]
+    print X[:10]
+    print V
     model = RNN(512, V)
     model.fit(X_train, y_train, show_fig=True)
 
